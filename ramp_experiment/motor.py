@@ -3,7 +3,7 @@
 """Module for controlling the stepper motor"""
 
 import time
-from A4988 import STEP_SLEEP
+from .A4988 import STEP_SLEEP
 
 class OutOfRangeError(Exception):
     """Exception raised if the desired position is out of the range of the motor"""
