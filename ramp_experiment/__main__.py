@@ -11,6 +11,6 @@ motor = WormMotor(driver, 0, 0.025, 1000, 0, 82)
 with Ramp(motor, 70) as ramp:
     print("Enter angles")
     while True:
-        ramp.set_angle(math.radians(int(input(">>> "))))
+        ramp.set_angle(math.radians(float(input(">>> "))))
         print(math.degrees(ramp.get_angle()))
 print("End")

@@ -47,6 +47,10 @@ class WormMotor:
         try:
             for _ in range(amount):
                 self.driver.step()
+                if direction == self.direction: # set steps immediately to prevent step loss if a exception occures
+                    self.steps += 1
+                else:
+                    self.steps -= 1
                 time.sleep(self.tps - STEP_SLEEP * 2)
         finally:
             self.driver.sleep() # prevent overheating if exception
@@ -61,7 +65,6 @@ class WormMotor:
                 self._move_steps(-diff, 1 if self.direction == 0 else 0)
             else:   # step already reached
                 pass
-            self.steps = steps
         else:
             raise OutOfRangeError("step count {0} exceeds limits of {1} (lower) and {2} (upper)".format(steps, self.limit_lower, self.limit_upper))
 
