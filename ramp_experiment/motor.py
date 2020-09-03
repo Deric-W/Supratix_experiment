@@ -86,9 +86,9 @@ class WormMotor:
         """set new position"""
         self.set_steps(int(position / self.step_width))
     
-    def iter_postion(self, position: float, step_size: int):
+    def iter_position(self, position: float, step_size: int):
         """set position step by step"""
-        yield from self.iter_steps(int(position / self.step_width), step_size)
+        yield from self.iter_steps(int(position / self.step_width), int(step_size / self.step_width))
 
     def get_position(self) -> float:
         """get current position"""

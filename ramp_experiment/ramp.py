@@ -32,4 +32,4 @@ class Ramp:
     
     def iter_angle(self, radians: float, step_size: int):
         """set angle step by step"""
-        yield from self.motor.iter_position(math.tan(radians - self.offset) * self.base, step_size)
+        yield from self.motor.iter_position(math.tan(radians - self.offset) * self.base, math.tan(step_size) * self.base)
