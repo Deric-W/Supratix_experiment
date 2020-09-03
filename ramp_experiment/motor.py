@@ -3,6 +3,7 @@
 """Module for controlling the stepper motor"""
 
 import time
+import math
 from .A4988 import STEP_SLEEP
 from onionGpio import Value
 
@@ -13,7 +14,7 @@ class OutOfRangeError(Exception):
 
 class WormMotor:
     """class for using motors with a worm gear"""
-    def __init__(self, driver, direction: Value, step_width: float, pps: float, limit_lower: float, limit_upper: float, position: int=0, reset_on_shutdown: bool=True) -> None:
+    def __init__(self, driver, direction: Value, step_width: float, pps: float, limit_lower: float = -math.inf, limit_upper: float = math.inf, position: int=0, reset_on_shutdown: bool=True) -> None:
         """init with motor driver, driver direction to increase position, step width, pulses per second,
         motor movement range, lower and upper limit, current position and if the position should be reset on shutdown"""
         driver.sleep()  # save energy
@@ -69,6 +70,13 @@ class WormMotor:
                 pass
         else:
             raise OutOfRangeError("step count {0} exceeds limits of {1} (lower) and {2} (upper)".format(steps, self.limit_lower, self.limit_upper))
+    
+    def iter_steps(self, steps: int, step_size: int):
+        """set steps step by step"""
+        step_size = -step_size if steps < self.steps else step_size
+        while abs(steps - self.steps) > abs(step_size):
+            yield self.set_steps(self.steps + step_size)
+        yield self.set_steps(steps)
 
     def get_steps(self) -> int:
         """get absolute step count"""
@@ -77,6 +85,10 @@ class WormMotor:
     def set_position(self, position: float) -> None:
         """set new position"""
         self.set_steps(int(position / self.step_width))
+    
+    def iter_postion(self, position: float, step_size: int):
+        """set position step by step"""
+        yield from self.iter_steps(int(position / self.step_width), step_size)
 
     def get_position(self) -> float:
         """get current position"""
