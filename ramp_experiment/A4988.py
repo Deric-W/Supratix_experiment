@@ -6,8 +6,8 @@
 import time
 from onionGpio import OnionGpio, Value, Direction
 
-WAKE_SLEEP = 0.001  # one ms
-STEP_SLEEP = 0.000001   # one µs
+WAKE_SLEEP = 0.001  # one ms, time to wait after waking up
+STEP_SLEEP = 0.000001   # one µs, time to wait after taking a step
 
 class A4988:
     """Class implementing the A4988 support"""
