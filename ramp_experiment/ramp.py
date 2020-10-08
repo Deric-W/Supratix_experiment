@@ -32,5 +32,5 @@ class Ramp:
         return math.atan((self.motor.get_position() + self.offset) / self.adjacent)     # like set_angle, just reversed
 
     def iter_angle(self, radians: float, step_size: float):
-        """set angle and yield control after moving a 'step_size' angle"""
-        yield from self.motor.iter_position(math.tan(radians) * self.adjacent - self.offset, math.tan(step_size) * self.adjacent)   # translate position and step size from radians to distances
+        """set angle and yield control after moving a 'step_size' distance"""
+        yield from self.motor.iter_position(math.tan(radians) * self.adjacent - self.offset, step_size)   # translate position from radians to distance

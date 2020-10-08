@@ -4,8 +4,8 @@
 
 import time
 import math
-from .A4988 import STEP_SLEEP
 from onionGpio import Value
+from .A4988 import STEP_SLEEP
 
 
 class OutOfRangeError(Exception):
