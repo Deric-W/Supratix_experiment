@@ -94,8 +94,9 @@ class WormMotor:
             else:
                 direction = self.direction
             while difference > step_size:               # while we can do at least one more step without reaching 'steps'
-                yield self._move_steps(step_size, direction)  # move step_size steps and yield control
+                self._move_steps(step_size, direction)  # move step_size steps
                 difference -= step_size                 # update difference
+                yield
             self._move_steps(difference, direction)     # move remaining steps
         else:
             raise OutOfRangeError("step count {0} exceeds limits of {1} (lower) and {2} (upper)".format(steps, self.limit_lower, self.limit_upper))
