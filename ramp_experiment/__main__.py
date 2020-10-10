@@ -6,6 +6,7 @@ import logging
 from argparse import ArgumentParser
 from configparser import ConfigParser, NoOptionError
 from collections import namedtuple
+from contextlib import ExitStack
 from threading import Event
 from queue import SimpleQueue, Empty
 from struct import Struct
@@ -258,24 +259,22 @@ except NoOptionError:
 else:
     mqtt_client.username_pw_set(username, config.get("mqtt", "password"))
 
-# setup elevator
-elevator = OnionPwm(
-    config.getint("elevator", "channel"),
-    config.getint("elevator", "chip"),
-)
-elevator.set_frequency(config.getint("elevator", "frequency"))
-elevator.set_duty_cycle(config.getfloat("elevator", "duty_cycle"))
+with ExitStack() as stack:
+    # setup elevator
+    elevator = stack.enter_context(OnionPwm(
+        config.getint("elevator", "channel"),
+        config.getint("elevator", "chip"),
+    ))
+    elevator.set_frequency(config.getint("elevator", "frequency"))
+    elevator.set_duty_cycle(config.getfloat("elevator", "duty_cycle"))
 
-# setup landing_zone
-landing_zone = OnionGpio(config.getint("landing_zone", "gpio"))
-landing_zone.setDirection(Direction.INPUT)
-landing_zone.setEdge(Edge.FALLING)  # prepare for edge
+    # setup landing_zone
+    landing_zone = stack.enter_context(OnionGpio(config.getint("landing_zone", "gpio")))
+    landing_zone.setDirection(Direction.INPUT)
+    landing_zone.setEdge(Edge.FALLING)  # prepare for edge
 
-server = RampServer(
-    host=config.get("mqtt", "host"),
-    port=config.getint("mqtt", "port"),
-    mqtt_client=mqtt_client,
-    ramp=Ramp(
+    # setup ramp
+    ramp = stack.enter_context(Ramp(
         WormMotor(
             A4988(
                 config.getint("driver", "enable"),
@@ -291,20 +290,29 @@ server = RampServer(
         ),
         config.getfloat("ramp", "base_length"),
         config.getfloat("ramp", "offset")
-    ),
-    step_size=config.getfloat("ramp", "step_size"),
-    elevator=elevator,
-    landing_zone=landing_zone,
-    landing_zone_timeout=config.getfloat("landing_zone", "timeout"),
-    logger=server_logger,
-    topics=Topics(
-        config.get("topics", "status"),
-        config.get("topics", "timestamp"),
-        config.get("topics", "current"),
-        config.get("topics", "target")
-    ),
-    qos=config.getint("mqtt", "qos")
-)
+    ))
+
+    # setup server
+    server = RampServer(
+        host=config.get("mqtt", "host"),
+        port=config.getint("mqtt", "port"),
+        mqtt_client=mqtt_client,
+        ramp=ramp,
+        step_size=config.getfloat("ramp", "step_size"),
+        elevator=elevator,
+        landing_zone=landing_zone,
+        landing_zone_timeout=config.getfloat("landing_zone", "timeout"),
+        logger=server_logger,
+        topics=Topics(
+            config.get("topics", "status"),
+            config.get("topics", "timestamp"),
+            config.get("topics", "current"),
+            config.get("topics", "target")
+        ),
+        qos=config.getint("mqtt", "qos")
+    )
+
+    stack.pop_all()     # setup successfull, shutdown is handled by server
 
 with server:
     server.loop_forever()
