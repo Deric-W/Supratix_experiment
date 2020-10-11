@@ -176,7 +176,7 @@ class RampServer:
                 except Empty:
                     pass
                 except Exception as e:
-                    self.logger.fatal(f"'{e}' occured while handling target")
+                    self.logger.fatal("Exception occured while handling target", exc_info=e)
                     raise
         finally:    # prevent stop() from hanging if an exception occures
             self.is_shutdown.set()
@@ -273,15 +273,18 @@ with ExitStack() as stack:
     landing_zone.setDirection(Direction.INPUT)
     landing_zone.setEdge(Edge.FALLING)  # prepare for edge
 
+    # setup driver
+    driver = stack.enter_context(A4988(
+        config.getint("driver", "enable"),
+        config.getint("driver", "sleep"),
+        config.getint("driver", "step"),
+        config.getint("driver", "dir")
+    ))
+
     # setup ramp
-    ramp = stack.enter_context(Ramp(
+    ramp = Ramp(
         WormMotor(
-            A4988(
-                config.getint("driver", "enable"),
-                config.getint("driver", "sleep"),
-                config.getint("driver", "step"),
-                config.getint("driver", "dir")
-            ),
+            driver,
             Value(config.get("motor", "direction")),
             config.getfloat("motor", "step_width"),
             config.getfloat("motor", "pps"),
@@ -290,7 +293,7 @@ with ExitStack() as stack:
         ),
         config.getfloat("ramp", "base_length"),
         config.getfloat("ramp", "offset")
-    ))
+    )
 
     # setup server
     server = RampServer(
