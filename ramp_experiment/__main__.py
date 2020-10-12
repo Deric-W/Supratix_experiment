@@ -3,6 +3,7 @@
 # run server (dont forget to set the pins 3 and 2 to GPIO mode and enable PWM)
 import time
 import logging
+import signal
 from argparse import ArgumentParser
 from configparser import ConfigParser, NoOptionError
 from collections import namedtuple
@@ -48,10 +49,10 @@ class LogLevel(Enum):
 
 class Status(Enum):
     """the status of the experiment"""
-    READY = 0
-    BUSY = 1
-    ERROR = 2
-    OFFLINE = 3
+    READY = 0       # ready to process targets
+    BUSY = 1        # processing target
+    ERROR = 2       # landing zone timout expired
+    OFFLINE = 3     # server offline or crashed
 
     @classmethod
     def from_bytes(cls, data: bytes):
@@ -73,6 +74,7 @@ class RampServer:
                  elevator: OnionPwm,
                  landing_zone: OnionGpio,
                  landing_zone_timeout: float,
+                 swing_time: float,
                  logger: logging.Logger,
                  topics: Topics,
                  qos: int = 0
@@ -83,14 +85,15 @@ class RampServer:
         self.elevator = elevator
         self.landing_zone = landing_zone
         self.landing_zone_timeout = landing_zone_timeout
+        self.swing_time = swing_time
         self.logger = logger
         self.topics = topics
         self.qos = qos
         self.target_queue = SimpleQueue()
-        self.shutdown_sheduled = False
+        self.shutdown_scheduled = False
         self.is_shutdown = Event()
 
-        self.mqtt_client.will_set(topics.status, Status.OFFLINE.to_bytes(), qos, retain=True)
+        self.mqtt_client.will_set(topics.status, Status.OFFLINE.to_bytes(), qos, retain=True)   # if the onion crashes, set status to offline
         self.mqtt_client.message_callback_add(topics.target_angle, self.submit_target)
         self.mqtt_client.connect(host, port)
         if self.mqtt_client.subscribe(topics.target_angle, qos)[0] != mqtt.MQTT_ERR_SUCCESS:
@@ -106,6 +109,7 @@ class RampServer:
         return False
 
     def submit_target(self, client: mqtt.Client, userdata, message: mqtt.MQTTMessage) -> None:
+        """submit target to be processed"""
         angle = angle_struct.unpack(message.payload)[0]
         self.logger.info(f"received angle {angle}")
         self.target_queue.put(angle)
@@ -125,13 +129,14 @@ class RampServer:
         try:
             self.logger.debug("waiting for edge")
             self.landing_zone.waitForEdge(self.landing_zone_timeout)
-        except TimeoutError:
+        except TimeoutError:    # marble left the experiment
             self.logger.error("landing zone timeout expired")
             self.update_status(Status.ERROR)
-        else:
+        else:                   # marble landed
             self.update_timestamp(time.time())
+            time.sleep(self.swing_time)  # wait for landing zone to stop swinging
             self.update_status(Status.READY)
-        finally:
+        finally:                # make sure to disable the elevator no matter what happens
             self.elevator.disable()
             self.logger.debug("disabled elevator")
 
@@ -169,13 +174,13 @@ class RampServer:
         try:
             self.update_status(Status.READY)
             self.mqtt_client.loop_start()
-            while not self.shutdown_sheduled:
+            while not self.shutdown_scheduled:
                 try:
                     target = self.target_queue.get(timeout=1)
                     self.handle_target(target)
-                except Empty:
+                except Empty:   # no targets to process, check for shutdown
                     pass
-                except Exception as e:
+                except Exception as e:  # something else happend, log exception and crash
                     self.logger.fatal("Exception occured while handling target", exc_info=e)
                     raise
         finally:    # prevent stop() from hanging if an exception occures
@@ -184,11 +189,11 @@ class RampServer:
     def stop(self) -> None:
         """stop processing targets"""
         self.logger.info("stopping loop")
-        self.shutdown_sheduled = True   # tell loop_forever() to stop
+        self.shutdown_scheduled = True   # tell loop_forever() to stop
         self.is_shutdown.wait()     # wait for it to stop
         self.update_status(Status.OFFLINE).wait_for_publish()   # update status and wait for messages to be send
         self.mqtt_client.loop_stop()
-        self.shutdown_sheduled = False      # reset to allow calling loop_forever() again
+        self.shutdown_scheduled = False      # reset to allow calling loop_forever() again
         self.logger.info("stopped server")
 
     def shutdown(self) -> None:
@@ -196,9 +201,10 @@ class RampServer:
         self.logger.info("shutting down server and devices")
         try:
             self.stop()
-            self.mqtt_client.disconnect()
+            self.mqtt_client.disconnect()   # disconnect after .stop() to allow queued messages to be send
         except Exception as e:
-            self.logger.fatal(f"server shutdown failed with {e}")
+            self.logger.fatal("server shutdown failed", exc_info=e)
+            raise   # dont hide exception
         finally:    # dont abort on error
             self.ramp.shutdown()    # shutdown devices after server to make sure they are not in use
             self.elevator.release()
@@ -305,6 +311,7 @@ with ExitStack() as stack:
         elevator=elevator,
         landing_zone=landing_zone,
         landing_zone_timeout=config.getfloat("landing_zone", "timeout"),
+        swing_time=config.getfloat("landing_zone", "swing_time"),
         logger=server_logger,
         topics=Topics(
             config.get("topics", "status"),
@@ -314,6 +321,8 @@ with ExitStack() as stack:
         ),
         qos=config.getint("mqtt", "qos")
     )
+
+    signal.signal(signal.SIGTERM, lambda signum, frame: setattr(server, "shutdown_scheduled", True))    # schedule shutdown of server loop, cleanup is handled by with statement
 
     stack.pop_all()     # setup successfull, shutdown is handled by server
 
