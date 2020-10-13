@@ -10,7 +10,6 @@ from collections import namedtuple
 from contextlib import ExitStack
 from threading import Event
 from queue import SimpleQueue, Empty
-from struct import Struct
 from enum import Enum
 import paho.mqtt.client as mqtt
 from onionGpio import OnionGpio, Value, Direction, Edge
@@ -19,13 +18,7 @@ from . import __version__
 from .A4988 import A4988
 from .motor import WormMotor
 from .ramp import Ramp
-
-
-angle_struct = Struct("!d")    # angle in radians as 64 bit float
-
-timestamp_struct = angle_struct     # unix timestamp as 64 bit float
-
-status_struct = Struct("!B")    # status as uint8
+from .mqtt import ANGLE_STRUCT, TIMESTAMP_STRUCT, Status
 
 
 Topics = namedtuple(
@@ -47,21 +40,27 @@ class LogLevel(Enum):
         return getattr(logging, self.name)
 
 
-class Status(Enum):
-    """the status of the experiment"""
-    READY = 0       # ready to process targets
-    BUSY = 1        # processing target
-    ERROR = 2       # landing zone timout expired
-    OFFLINE = 3     # server offline or crashed
+class Waiter:
+    """class enforcing a certain time period between actions"""
+    def __init__(self, period: float) -> None:
+        self.period = period
+        self.timestamp = 0.0
 
-    @classmethod
-    def from_bytes(cls, data: bytes):
-        """convert bytes to variant"""
-        return cls(status_struct.unpack(data)[0])
+    def reset(self) -> None:
+        """reset waiter to waiting state"""
+        self.timestamp = time.time()
 
-    def to_bytes(self) -> bytes:
-        """convert variant to bytes"""
-        return status_struct.pack(self.value)
+    def wait(self) -> float:
+        """wait until waiter finishes waiting, return time spend sleeping"""
+        to_wait = self.period + self.timestamp - time.time()
+        if to_wait > 0:
+            time.sleep(to_wait)
+            return to_wait
+        return 0
+
+    def is_waiting(self) -> bool:
+        """return if wait() would sleep"""
+        return self.period + self.timestamp - time.time() > 0
 
 
 class RampServer:
@@ -85,11 +84,11 @@ class RampServer:
         self.elevator = elevator
         self.landing_zone = landing_zone
         self.landing_zone_timeout = landing_zone_timeout
-        self.swing_time = swing_time
+        self.landing_zone_waiter = Waiter(swing_time)   # use waiter to prevent pointless sleeping
         self.logger = logger
         self.topics = topics
         self.qos = qos
-        self.target_queue = SimpleQueue()
+        self.target_queue = SimpleQueue()  # type: SimpleQueue[float]
         self.shutdown_scheduled = False
         self.is_shutdown = Event()
 
@@ -110,7 +109,7 @@ class RampServer:
 
     def submit_target(self, client: mqtt.Client, userdata, message: mqtt.MQTTMessage) -> None:
         """submit target to be processed"""
-        angle = angle_struct.unpack(message.payload)[0]
+        angle = ANGLE_STRUCT.unpack(message.payload)[0]
         self.logger.info(f"received angle {angle}")
         self.target_queue.put(angle)
 
@@ -124,6 +123,7 @@ class RampServer:
         current_angle = self.ramp.get_angle()
         self.update_current(current_angle)  # update final angle
         self.logger.debug(f"reached angle {current_angle}")
+        self.logger.debug(f"waited {self.landing_zone_waiter.wait()} seconds for landing zone to stop swinging")     # wait for ramp to stop swinging
         self.logger.debug("enable elevator")
         self.elevator.enable()
         try:
@@ -134,18 +134,18 @@ class RampServer:
             self.update_status(Status.ERROR)
         else:                   # marble landed
             self.update_timestamp(time.time())
-            time.sleep(self.swing_time)  # wait for landing zone to stop swinging
             self.update_status(Status.READY)
         finally:                # make sure to disable the elevator no matter what happens
             self.elevator.disable()
             self.logger.debug("disabled elevator")
+            self.landing_zone_waiter.reset()    # make next experiment wait for zone to stop swinging
 
     def update_timestamp(self, timestamp: float) -> mqtt.MQTTMessageInfo:
         """update last timestamp"""
         self.logger.info(f"updating timestamp to {timestamp}")
         return self.mqtt_client.publish(
             self.topics.last_timestamp,
-            timestamp_struct.pack(timestamp),
+            TIMESTAMP_STRUCT.pack(timestamp),
             self.qos
         )
 
@@ -164,7 +164,7 @@ class RampServer:
         self.logger.info(f"updating current angle to {angle}")
         return self.mqtt_client.publish(
             self.topics.current_angle,
-            angle_struct.pack(angle),
+            ANGLE_STRUCT.pack(angle),
             self.qos
         )
 
