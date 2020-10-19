@@ -2,8 +2,8 @@
 
 """Module containing objects to communicate with the MQTT Client"""
 
-from struct import Struct
 from enum import Enum
+from struct import Struct
 
 
 ANGLE_STRUCT = Struct("!d")    # angle in radians as 64 bit float

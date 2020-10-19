@@ -1,25 +1,24 @@
 #!/usr/bin/python3
 
 # run server (dont forget to set the pins 3 and 2 to GPIO mode and enable PWM)
-import time
 import logging
 import signal
+import time
 from argparse import ArgumentParser
-from configparser import ConfigParser, NoOptionError
 from collections import namedtuple
+from configparser import ConfigParser, NoOptionError
 from contextlib import ExitStack
-from threading import Event
-from queue import SimpleQueue, Empty
 from enum import Enum
+from queue import Empty, SimpleQueue
+from threading import Event
 import paho.mqtt.client as mqtt
-from onionGpio import OnionGpio, Value, Direction, Edge
+from onionGpio import Direction, Edge, OnionGpio, Value
 from onionPwm import OnionPwm
 from . import __version__
 from .A4988 import A4988
 from .motor import WormMotor
-from .ramp import Ramp
 from .mqtt import ANGLE_STRUCT, TIMESTAMP_STRUCT, Status
-
+from .ramp import Ramp
 
 Topics = namedtuple(
     "Topics",
@@ -60,7 +59,7 @@ class Waiter:
 
     def is_waiting(self) -> bool:
         """return if wait() would sleep"""
-        return self.period + self.timestamp - time.time() > 0
+        return self.period + self.timestamp > time.time()
 
 
 class RampServer:
@@ -89,14 +88,14 @@ class RampServer:
         self.topics = topics
         self.qos = qos
         self.target_queue = SimpleQueue()  # type: SimpleQueue[float]
-        self.shutdown_scheduled = False
-        self.is_shutdown = Event()
+        self.stop_scheduled = False
+        self.is_stopped = Event()
 
         self.mqtt_client.will_set(topics.status, Status.OFFLINE.to_bytes(), qos, retain=True)   # if the onion crashes, set status to offline
         self.mqtt_client.message_callback_add(topics.target_angle, self.submit_target)
         self.mqtt_client.connect(host, port)
         if self.mqtt_client.subscribe(topics.target_angle, qos)[0] != mqtt.MQTT_ERR_SUCCESS:
-            self.logger.fatal(f"failed to subscribe to {topics.target_angle}")
+            self.logger.critical(f"failed to subscribe to {topics.target_angle}")
             raise ValueError(f"failed to subscribe to '{topics.target_angle}'")
         self.logger.info(f"connecting to {host} on port {port}")
 
@@ -123,7 +122,7 @@ class RampServer:
         current_angle = self.ramp.get_angle()
         self.update_current(current_angle)  # update final angle
         self.logger.debug(f"reached angle {current_angle}")
-        self.logger.debug(f"waited {self.landing_zone_waiter.wait()} seconds for landing zone to stop swinging")     # wait for ramp to stop swinging
+        self.logger.debug(f"waited {self.landing_zone_waiter.wait()} seconds for landing zone to stop swinging")     # wait for oscillations to stop
         self.logger.debug("enable elevator")
         self.elevator.enable()
         try:
@@ -138,7 +137,7 @@ class RampServer:
         finally:                # make sure to disable the elevator no matter what happens
             self.elevator.disable()
             self.logger.debug("disabled elevator")
-            self.landing_zone_waiter.reset()    # make next experiment wait for zone to stop swinging
+            self.landing_zone_waiter.reset()    # make next experiment wait for oscillations of the landing zone to stop
 
     def update_timestamp(self, timestamp: float) -> mqtt.MQTTMessageInfo:
         """update last timestamp"""
@@ -170,30 +169,35 @@ class RampServer:
 
     def loop_forever(self) -> None:
         """process targets until stop() is called"""
-        self.is_shutdown.clear()    # make stop() block
+        self.is_stopped.clear()    # make stop() block
         try:
             self.update_status(Status.READY)
             self.mqtt_client.loop_start()
-            while not self.shutdown_scheduled:
+            while not self.stop_scheduled:
                 try:
                     target = self.target_queue.get(timeout=1)
                     self.handle_target(target)
                 except Empty:   # no targets to process, check for shutdown
                     pass
                 except Exception as e:  # something else happend, log exception and crash
-                    self.logger.fatal("Exception occured while handling target", exc_info=e)
+                    self.logger.critical("Exception occured while handling target", exc_info=e)
                     raise
         finally:    # prevent stop() from hanging if an exception occures
-            self.is_shutdown.set()
+            self.is_stopped.set()
+            self.stop_scheduled = False     # reset to allow calling loop_forever() again
+
+    def schedule_stop(self) -> None:
+        """tell loop_forever() to stop processing targets"""
+        self.stop_scheduled = True
 
     def stop(self) -> None:
-        """stop processing targets"""
+        """wait for loop_forever() to stop processing targets"""
         self.logger.info("stopping loop")
-        self.shutdown_scheduled = True   # tell loop_forever() to stop
-        self.is_shutdown.wait()     # wait for it to stop
+        self.schedule_stop()
+        self.is_stopped.wait()     # wait for it to stop
         self.update_status(Status.OFFLINE).wait_for_publish()   # update status and wait for messages to be send
         self.mqtt_client.loop_stop()
-        self.shutdown_scheduled = False      # reset to allow calling loop_forever() again
+        self.stop_scheduled = False     # reset to allow calling loop_forever() again in case it was not running
         self.logger.info("stopped server")
 
     def shutdown(self) -> None:
@@ -203,7 +207,7 @@ class RampServer:
             self.stop()
             self.mqtt_client.disconnect()   # disconnect after .stop() to allow queued messages to be send
         except Exception as e:
-            self.logger.fatal("server shutdown failed", exc_info=e)
+            self.logger.critical("server shutdown failed", exc_info=e)
             raise   # dont hide exception
         finally:    # dont abort on error
             self.ramp.shutdown()    # shutdown devices after server to make sure they are not in use
@@ -322,7 +326,7 @@ with ExitStack() as stack:
         qos=config.getint("mqtt", "qos")
     )
 
-    signal.signal(signal.SIGTERM, lambda signum, frame: setattr(server, "shutdown_scheduled", True))    # schedule shutdown of server loop, cleanup is handled by with statement
+    signal.signal(signal.SIGTERM, lambda signum, frame: server.schedule_stop())    # schedule shutdown of server loop, cleanup is handled by with statement
 
     stack.pop_all()     # setup successfull, shutdown is handled by server
 

@@ -2,8 +2,8 @@
 
 """Module for controlling the stepper motor"""
 
-import time
 import math
+import time
 from onionGpio import Value
 from .A4988 import STEP_SLEEP
 

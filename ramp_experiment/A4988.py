@@ -4,7 +4,7 @@
 # datasheet: https://www.pololu.com/file/0J450/a4988_DMOS_microstepping_driver_with_translator.pdf
 
 import time
-from onionGpio import OnionGpio, Value, Direction
+from onionGpio import Direction, OnionGpio, Value
 
 WAKE_SLEEP = 0.001  # one ms, time to wait after waking up
 STEP_SLEEP = 0.000001   # one µs, time to wait after taking a step
