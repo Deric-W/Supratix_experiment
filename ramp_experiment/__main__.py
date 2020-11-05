@@ -5,7 +5,7 @@ import logging
 import signal
 import time
 from argparse import ArgumentParser
-from typing import NamedTuple
+from typing import NamedTuple, Optional
 from configparser import ConfigParser, NoOptionError
 from contextlib import ExitStack
 from enum import Enum
@@ -98,7 +98,7 @@ class RampServer:
         self.logger = logger
         self.topics = topics
         self.qos = qos
-        self.target_queue = SimpleQueue()  # type: SimpleQueue[float]
+        self.target_queue = SimpleQueue()  # type: SimpleQueue[Optional[float]]
         self.stop_scheduled = False
         self.is_stopped = Event()
 
@@ -119,9 +119,14 @@ class RampServer:
 
     def submit_target(self, client: mqtt.Client, userdata, message: mqtt.MQTTMessage) -> None:
         """submit target to be processed"""
-        angle = ANGLE_STRUCT.unpack(message.payload)[0]
-        self.logger.info(f"received angle {angle}")
-        self.target_queue.put(angle)
+        try:
+            angle = ANGLE_STRUCT.unpack(message.payload)[0]
+        except Exception as e:
+            self.logger.critical(f"failed to unpack {message.payload}, signaling main loop to crash", exc_info=e)
+            self.target_queue.put(None)
+        else:
+            self.logger.info(f"received angle {angle}")
+            self.target_queue.put(angle)
 
     def handle_target(self, angle: float) -> None:
         """process a single target angle"""
@@ -186,7 +191,11 @@ class RampServer:
             self.mqtt_client.loop_start()
             while not self.stop_scheduled:
                 try:
-                    self.handle_target(self.target_queue.get(timeout=0.5))
+                    target = self.target_queue.get(timeout=0.5)
+                    if target is not None:
+                        self.handle_target(target)
+                    else:
+                        raise ValueError("encountered an error during unpacking")
                 except Empty:   # no targets to process, check for shutdown
                     pass
                 except Exception as e:  # something else happend, log exception and crash
