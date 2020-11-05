@@ -5,7 +5,7 @@ import logging
 import signal
 import time
 from argparse import ArgumentParser
-from collections import namedtuple
+from typing import NamedTuple
 from configparser import ConfigParser, NoOptionError
 from contextlib import ExitStack
 from enum import Enum
@@ -20,10 +20,13 @@ from .motor import WormMotor
 from .mqtt import ANGLE_STRUCT, TIMESTAMP_STRUCT, Status
 from .ramp import Ramp
 
-Topics = namedtuple(
-    "Topics",
-    ("status", "last_timestamp", "current_angle", "target_angle")
-)
+
+class Topics(NamedTuple):
+    """named tuple containing the mqtt topics"""
+    status: str
+    last_timestamp: str
+    current_angle: str
+    target_angle: str
 
 
 class LogLevel(Enum):
@@ -42,24 +45,32 @@ class LogLevel(Enum):
 class Waiter:
     """class enforcing a certain time period between actions"""
     def __init__(self, period: float) -> None:
+        """init with period in seconds"""
         self.period = period
-        self.timestamp = 0.0
+        self.timestamp = time.monotonic() - period
 
-    def reset(self) -> None:
-        """reset waiter to waiting state"""
-        self.timestamp = time.time()
+    def __enter__(self) -> float:
+        return self.wait()
+
+    def __exit__(self, type, value, traceback) -> bool:
+        self.reset()
+        return False
 
     def wait(self) -> float:
-        """wait until waiter finishes waiting, return time spend sleeping"""
-        to_wait = self.period + self.timestamp - time.time()
+        """wait remaining time, return time spend sleeping"""
+        to_wait = self.timestamp + self.period - time.monotonic()
         if to_wait > 0:
             time.sleep(to_wait)
             return to_wait
         return 0
 
     def is_waiting(self) -> bool:
-        """return if wait() would sleep"""
-        return self.period + self.timestamp > time.time()
+        """check if wait() would block"""
+        return self.timestamp + self.period > time.monotonic()
+
+    def reset(self) -> None:
+        """reset waiter to waiting state"""
+        self.timestamp = time.monotonic()
 
 
 class RampServer:
@@ -122,22 +133,22 @@ class RampServer:
         current_angle = self.ramp.get_angle()
         self.update_current(current_angle)  # update final angle
         self.logger.debug(f"reached angle {current_angle}")
-        self.logger.debug(f"waited {self.landing_zone_waiter.wait()} seconds for landing zone to stop swinging")     # wait for oscillations to stop
-        self.logger.debug("enable elevator")
-        self.elevator.enable()
-        try:
-            self.logger.debug("waiting for edge")
-            self.landing_zone.waitForEdge(self.landing_zone_timeout)
-        except TimeoutError:    # marble left the experiment
-            self.logger.error("landing zone timeout expired")
-            self.update_status(Status.ERROR)
-        else:                   # marble landed
-            self.update_timestamp(time.time())
-            self.update_status(Status.READY)
-        finally:                # make sure to disable the elevator no matter what happens
-            self.elevator.disable()
-            self.logger.debug("disabled elevator")
-            self.landing_zone_waiter.reset()    # make next experiment wait for oscillations of the landing zone to stop
+        with self.landing_zone_waiter as waited:    # wait for oscillations to stop
+            self.logger.debug(f"waited {waited} seconds for landing zone to stop swinging")
+            self.logger.debug("enable elevator")
+            self.elevator.enable()
+            try:
+                self.logger.debug("waiting for edge")
+                self.landing_zone.waitForEdge(self.landing_zone_timeout)
+            except TimeoutError:    # marble left the experiment
+                self.logger.error("landing zone timeout expired")
+                self.update_status(Status.ERROR)
+            else:                   # marble landed
+                self.update_timestamp(time.time())
+                self.update_status(Status.READY)
+            finally:                # make sure to disable the elevator no matter what happens
+                self.elevator.disable()
+                self.logger.debug("disabled elevator")
 
     def update_timestamp(self, timestamp: float) -> mqtt.MQTTMessageInfo:
         """update last timestamp"""
@@ -175,16 +186,17 @@ class RampServer:
             self.mqtt_client.loop_start()
             while not self.stop_scheduled:
                 try:
-                    target = self.target_queue.get(timeout=1)
-                    self.handle_target(target)
+                    self.handle_target(self.target_queue.get(timeout=0.5))
                 except Empty:   # no targets to process, check for shutdown
                     pass
                 except Exception as e:  # something else happend, log exception and crash
                     self.logger.critical("Exception occured while handling target", exc_info=e)
                     raise
         finally:    # prevent stop() from hanging if an exception occures
-            self.is_stopped.set()
+            self.update_status(Status.OFFLINE).wait_for_publish()   # update status and wait for messages to be send
+            self.mqtt_client.loop_stop()
             self.stop_scheduled = False     # reset to allow calling loop_forever() again
+            self.is_stopped.set()
 
     def schedule_stop(self) -> None:
         """tell loop_forever() to stop processing targets"""
@@ -195,8 +207,6 @@ class RampServer:
         self.logger.info("stopping loop")
         self.schedule_stop()
         self.is_stopped.wait()     # wait for it to stop
-        self.update_status(Status.OFFLINE).wait_for_publish()   # update status and wait for messages to be send
-        self.mqtt_client.loop_stop()
         self.stop_scheduled = False     # reset to allow calling loop_forever() again in case it was not running
         self.logger.info("stopped server")
 
